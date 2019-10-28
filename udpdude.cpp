@@ -133,7 +133,7 @@ bool UDPDude::IsListening() { return listening; }
 //***************************************************************************************
 //--- Function for sending messages to the specified address ----------------------------
 //***************************************************************************************
-bool Send(uint8_t* data, size_t size, string address, uint16_t port) {
+bool UDPDude::Send(uint8_t* data, size_t size, string address, uint16_t port) {
     bool _result = true;
     sockaddr_in _addr;
     _addr.sin_family = AF_INET;
@@ -152,14 +152,12 @@ bool Send(uint8_t* data, size_t size, string address, uint16_t port) {
                   (_i == (_packets - 1)) ? _lastSize : MTU,
                   MSG_CONFIRM, _sAddr, sizeof (_addr)) < 0) {
 
+            _result = false;
             if(Log != nullptr) {
-                _result = false;
                 Log("UDP: Sending error", LOG_ERROR);
             }
         }
     }
-    delete _sAddr;
-
     return _result;
 }
 
