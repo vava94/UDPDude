@@ -8,54 +8,20 @@
 #include <stdio.h>
 #include <pthread.h>
 
-//***************************************************************************************
-//--- Local & Static variables ----------------------------------------------------------
-//***************************************************************************************
-
-struct TargetSocket {
-private:
-    SOCKET _descriptor = 0;
-    struct sockaddr_in _address;
-
-public:
-    TargetSocket(SOCKET descriptor) { _descriptor = descriptor; }
-    SOCKET Descriptor() { return _descriptor; }
-    string Address() { return inet_ntoa(_address.sin_addr); }
-    void SetAddress(sockaddr_in address) { _address = address; }
-    uint16_t Port(){ return ntohs(_address.sin_port); }
-    sockaddr_in SockAddress() { return  _address; }
-};
-
-static TargetSocket *targetSocket, *serverSocket;
-static bool listening = false;
-static pthread_t serverThread;
+#include <utility>
+#include <execution>
 
 #define MTU 4096
 #define MAX_READ 65536
 
-#define LOG_INFO 0
-#define LOG_WARNING 1
-#define LOG_ERROR 3
-
-//***************************************************************************************
-//--- Callbacks -------------------------------------------------------------------------
-//***************************************************************************************
-
-static void (*DataReceived)(uint8_t* data, size_t size, string address, uint16_t port);
-static void (*Log)(string text, int type);
-
-//***************************************************************************************
-//--- Constructor -----------------------------------------------------------------------
-///-- Arguments are callbacks -----------------------------------------------------------
-///-- 1) Callback for received Data -----------------------------------------------------
-///-- 2) Callback for logging function (not necessary) ----------------------------------
-//***************************************************************************************
-UDPDude::UDPDude(void (*DataReceivedCallBack)(uint8_t*, size_t, string, uint16_t),
-        void (*LogCallback)(string, int))
+UDPDude::UDPDude(std::function<void(uint8_t *, size_t, std::string, uint16_t)> callback1,
+                 std::function<void(const std::string&, int)> callback2)
 {
-    DataReceived = DataReceivedCallBack;
-    Log = LogCallback;
-    Log("UDP Процесс запущен", 0);
+    callback_dataReceived = std::move(callback1);
+    callback_log = std::move(callback2);
+    if (callback_log) {
+        callback_log("UDPDude started", LOG_INFO);
+    }
     #ifdef _WIN32
     WSADATA              wsaData;
     WSAStartup(MAKEWORD(2,2), &wsaData);
@@ -63,98 +29,98 @@ UDPDude::UDPDude(void (*DataReceivedCallBack)(uint8_t*, size_t, string, uint16_t
     SOCKET _descriptor1 = socket(AF_INET, SOCK_DGRAM, 0);
     SOCKET _descriptor2 = socket(AF_INET, SOCK_DGRAM, 0);
     if (_descriptor1 == INVALID_SOCKET || _descriptor2 == INVALID_SOCKET) {
-        if(Log != nullptr)
-            Log("UDP: Invalid socket", LOG_ERROR);
+        if(callback_log)
+            callback_log("UDPDude: Can't create socket", LOG_ERROR);
     } else {
-        if(Log != nullptr)
-            Log("UDP: Socket created successfully", LOG_INFO);
-        targetSocket = new TargetSocket(_descriptor1);
-        serverSocket = new TargetSocket(_descriptor2);
+        if(callback_log)
+            callback_log("UDPDude: Socket created successfully", LOG_INFO);
+        mTargetSocket = new TargetSocket(_descriptor1);
+        mServerSocket = new TargetSocket(_descriptor2);
     }
 }
 
 //***************************************************************************************
 //--- Servers Data Receive Cycle --------------------------------------------------------
 //***************************************************************************************
-void *UDPDude::ReceiveLoop(void *arg) {
-    auto _serverSocket = reinterpret_cast<TargetSocket*>(arg);
-    auto _descriptor = _serverSocket->Descriptor();
-    sockaddr_in _serverAddress = _serverSocket->SockAddress(),
-            _clientAddress;
-    string _clientAddressStr = "";
+void UDPDude::ReceiveLoop() {
+
+    auto descriptor = mServerSocket->Descriptor();
+    sockaddr_in serverAddress = mServerSocket->SockAddress(),
+            clientAddress{};
+    std::string clientAddressStr;
 
     #ifdef _WIN32
-    int _addrlen,
-        _received = 0;
+    int addrlen,
+        received = 0;
     #elif __linux
-    socklen_t _addrlen;
-    ssize_t _received = 0;
+    socklen_t addrlen;
+    ssize_t received = 0;
     #endif
 
-    uint8_t *_buffer = static_cast<uint8_t*>(malloc(MAX_READ));
+    auto *buffer = new uint8_t[MAX_READ];
 
-    _addrlen = sizeof (_clientAddress);
-    if (bind(_descriptor, reinterpret_cast<sockaddr*>(&_serverAddress),
-             sizeof(_serverAddress)) < 0) {
-        if(Log != nullptr)
-            Log("UDP: Bind error", 2);
-        return nullptr;
+    addrlen = sizeof (clientAddress);
+    if (::bind(descriptor, reinterpret_cast<sockaddr*>(&serverAddress),
+             sizeof(serverAddress)) < 0) {
+        if(callback_log)
+            callback_log("UDPDude: Bind error", 2);
+        return;
     }
-    listening = true;
-    if(Log != nullptr)
-        Log("UDP: Listening started", 0);
-    while(listening) {
-        _received = recvfrom(_descriptor, _buffer, MAX_READ, 0,
-                             reinterpret_cast<sockaddr*>(&_clientAddress), &_addrlen);
-        if(_received > 0) {
-            DataReceived(_buffer,
-                         static_cast<size_t>(_received),
-                         inet_ntoa(_clientAddress.sin_addr),
-                         ntohs(_clientAddress.sin_port));
+    mListening = true;
+    if(callback_log) {
+        callback_log("UDPDude: Listening started", 0);
+    }
+    while(mListening) {
+        received = recvfrom(descriptor, buffer, MAX_READ, 0,
+                             reinterpret_cast<sockaddr*>(&clientAddress), &addrlen);
+        if(received > 0) {
+            callback_dataReceived(buffer,
+                         static_cast<size_t>(received),
+                         inet_ntoa(clientAddress.sin_addr),
+                         ntohs(clientAddress.sin_port));
         } else {
             break;
         }
     }
-    listening = false;
-    if(Log != nullptr)
-        Log("UDP: Listening stopped",0);
-    listening = false;
-    delete _buffer;
-    delete _serverSocket;
-    return nullptr;
+    mListening = false;
+    if(callback_log) {
+        callback_log("UDPDude: Listening stopped", 0);
+    }
+    mListening = false;
+    delete[] buffer;
 }
 
 //***************************************************************************************
 //--- Function that check server status -------------------------------------------------
 ///-- Returns TRUE if server is listening -----------------------------------------------
 //***************************************************************************************
-bool UDPDude::IsListening() { return listening; }
+bool UDPDude::IsListening() const { return mListening; }
 
 //***************************************************************************************
 //--- Function for sending messages to the specified address ----------------------------
 //***************************************************************************************
-bool UDPDude::Send(uint8_t* data, size_t size, string address, uint16_t port) {
+bool UDPDude::Send(uint8_t* data, size_t size, std::string address, uint16_t port) {
     bool _result = true;
-    sockaddr_in _addr;
-    _addr.sin_family = AF_INET;
-    _addr.sin_port = htons(port);
-    _result = inet_pton(AF_INET, address.data(), &(_addr.sin_addr));
+    sockaddr_in addrIn{};
+    addrIn.sin_family = AF_INET;
+    addrIn.sin_port = htons(port);
+    _result = inet_pton(AF_INET, address.data(), &(addrIn.sin_addr));
     if(!_result) return _result;
 
-    sockaddr *_sAddr = reinterpret_cast<sockaddr*>(&_addr);
-    targetSocket->SetAddress(_addr);
+    auto *sockAddr = reinterpret_cast<sockaddr*>(&addrIn);
+    mTargetSocket->SetAddress(addrIn);
 
-    auto _packets = (size - 1) / MTU + 1;
-    auto _lastSize = size > MTU ? size - (_packets - 1) * MTU : size;
+    auto packets = (size - 1) / MTU + 1;
+    auto lastSize = size > MTU ? size - (packets - 1) * MTU : size;
 
-    for(ulong _i = 0; _i < _packets; _i++) {
-        if(sendto(targetSocket->Descriptor(), &data[_i * MTU],
-                  (_i == (_packets - 1)) ? _lastSize : MTU,
-                  MSG_CONFIRM, _sAddr, sizeof (_addr)) < 0) {
+    for(ulong _i = 0; _i < packets; _i++) {
+        if(sendto(mTargetSocket->Descriptor(), &data[_i * MTU],
+                  (_i == (packets - 1)) ? lastSize : MTU,
+                  MSG_CONFIRM, sockAddr, sizeof (addrIn)) < 0) {
 
             _result = false;
-            if(Log != nullptr) {
-                Log("UDP: Sending error", LOG_ERROR);
+            if(callback_log) {
+                callback_log("UDPDude: Sending error", LOG_ERROR);
             }
         }
     }
@@ -165,20 +131,24 @@ bool UDPDude::Send(uint8_t* data, size_t size, string address, uint16_t port) {
 //--- Function that launches UDP server -------------------------------------------------
 //***************************************************************************************
 void UDPDude::StartServer(uint16_t port) {
-    sockaddr_in _addr;
-    _addr.sin_family = AF_INET;
-    _addr.sin_port = htons(port);
-    _addr.sin_addr.s_addr = INADDR_ANY;
-    serverSocket->SetAddress(_addr);
-    pthread_create(&serverThread, nullptr, ReceiveLoop, serverSocket);
+    sockaddr_in addrIn{};
+    addrIn.sin_family = AF_INET;
+    addrIn.sin_port = htons(port);
+    addrIn.sin_addr.s_addr = INADDR_ANY;
+    mServerSocket->SetAddress(addrIn);
+    mServerThread = new std::thread([this] { ReceiveLoop(); });
 }
 
 //***************************************************************************************
 //--- Function that stops UDP server ----------------------------------------------------
 //***************************************************************************************
 void UDPDude::StopServer() {
-    listening = false;
-    pthread_cancel(serverThread);
+    mListening = false;
+    close(mServerSocket->Descriptor());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if(mServerThread != nullptr) {
+        mServerThread->join();
+    }
 }
 
 //***************************************************************************************
@@ -186,5 +156,5 @@ void UDPDude::StopServer() {
 //***************************************************************************************
 
 UDPDude::~UDPDude() {
-    if(listening) StopServer();
+    if(mListening) StopServer();
 }
